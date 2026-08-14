@@ -1,7 +1,7 @@
 """
 Parentune Conversational Intelligence — NLP Project Prototype
 IIM Amritsar — NLP Term IV
-
+ 
 Pipeline:
   Module 1 — Topic classification        : TF-IDF + Logistic Regression (local, trained on sample data)
   Module 2 — Similar discussion retrieval: TF-IDF + cosine similarity (local)
@@ -9,7 +9,7 @@ Pipeline:
   Module 4 — Discussion summarisation    : Gemini API (LLM call, no local training)
   Module 5 — Conversational interface    : Streamlit chat UI, template-driven output
 """
-
+ 
 import os
 import re
 import pandas as pd
@@ -17,32 +17,32 @@ import streamlit as st
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics.pairwise import cosine_similarity
-
+ 
 from google import genai
-
+ 
 # --------------------------------------------------------------------------------------
 # Page setup
 # --------------------------------------------------------------------------------------
 st.set_page_config(page_title="Parentune Conversational Intelligence", page_icon="👶", layout="centered")
-
+ 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 SIMILARITY_THRESHOLD = 0.15  # below this, we tell the user no strongly similar discussion was found
-
+ 
 # --------------------------------------------------------------------------------------
 # Data loading
 # --------------------------------------------------------------------------------------
 @st.cache_data
 def load_training_data():
     return pd.read_csv(os.path.join(DATA_DIR, "training_queries.csv"))
-
-
+ 
+ 
 @st.cache_data
 def load_discussions():
     df = pd.read_csv(os.path.join(DATA_DIR, "discussions.csv"))
     df["full_text"] = df["title"] + ". " + df["comments"].str.replace("|||", " ", regex=False)
     return df
-
-
+ 
+ 
 # --------------------------------------------------------------------------------------
 # Module 1 — topic classifier (local, no external API)
 # --------------------------------------------------------------------------------------
@@ -54,15 +54,15 @@ def train_classifier():
     clf = LogisticRegression(max_iter=1000)
     clf.fit(X, train_df["category"])
     return vectorizer, clf
-
-
+ 
+ 
 def classify_query(query, vectorizer, clf):
     X = vectorizer.transform([query])
     pred = clf.predict(X)[0]
     proba = clf.predict_proba(X).max()
     return pred, proba
-
-
+ 
+ 
 # --------------------------------------------------------------------------------------
 # Module 2 — similarity / duplicate-discussion retrieval (local, no external API)
 # --------------------------------------------------------------------------------------
@@ -72,8 +72,8 @@ def build_similarity_index():
     vectorizer = TfidfVectorizer(stop_words="english")
     X = vectorizer.fit_transform(discussions_df["full_text"])
     return vectorizer, X
-
-
+ 
+ 
 def retrieve_similar_discussions(query, top_n=3):
     vectorizer, X = build_similarity_index()
     discussions_df = load_discussions()
@@ -83,18 +83,18 @@ def retrieve_similar_discussions(query, top_n=3):
     results = discussions_df.iloc[top_idx].copy()
     results["similarity"] = sims[top_idx]
     return results
-
-
+ 
+ 
 # --------------------------------------------------------------------------------------
 # Gemini API setup
 # --------------------------------------------------------------------------------------
-GEMINI_MODEL = "gemini-2.5-flash"
-
-
+GEMINI_MODEL = "gemini-flash-latest"
+ 
+ 
 def get_gemini_client(api_key):
     return genai.Client(api_key=api_key)
-
-
+ 
+ 
 # --------------------------------------------------------------------------------------
 # Module 4 — summarisation via Gemini API
 # --------------------------------------------------------------------------------------
@@ -108,8 +108,8 @@ def summarise_discussion(comments_text, api_key):
     )
     response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
     return response.text.strip()
-
-
+ 
+ 
 # --------------------------------------------------------------------------------------
 # Module 3 — risk / warning flagging via Gemini API
 # --------------------------------------------------------------------------------------
@@ -129,31 +129,31 @@ def flag_risky_language(comments_text, api_key):
     )
     response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
     text = response.text.strip()
-
+ 
     flag_match = re.search(r"FLAG:\s*(YES|NO)", text, re.IGNORECASE)
     reason_match = re.search(r"REASON:\s*(.+)", text, re.IGNORECASE)
-
+ 
     flagged = bool(flag_match and flag_match.group(1).upper() == "YES")
     reason = reason_match.group(1).strip() if reason_match else text
     return flagged, reason
-
-
+ 
+ 
 # --------------------------------------------------------------------------------------
 # Module 5 — conversational interface
 # --------------------------------------------------------------------------------------
 def run_pipeline(query, api_key):
     vectorizer, clf = train_classifier()
     category, confidence = classify_query(query, vectorizer, clf)
-
+ 
     similar = retrieve_similar_discussions(query, top_n=3)
     top_match = similar.iloc[0]
     is_similar_found = top_match["similarity"] >= SIMILARITY_THRESHOLD
-
+ 
     summary, flagged, reason = None, False, None
     if is_similar_found:
         summary = summarise_discussion(top_match["comments"], api_key)
         flagged, reason = flag_risky_language(top_match["comments"], api_key)
-
+ 
     return {
         "category": category,
         "confidence": confidence,
@@ -164,34 +164,34 @@ def run_pipeline(query, api_key):
         "flagged": flagged,
         "reason": reason,
     }
-
-
+ 
+ 
 def format_bot_reply(result):
     lines = []
     lines.append(
         f"**I categorised this as: {result['category']}** "
         f"(confidence: {result['confidence']*100:.0f}%)"
     )
-
+ 
     if not result["is_similar_found"]:
         lines.append("I couldn't find a closely related past discussion for this query yet.")
         return "\n\n".join(lines)
-
+ 
     lines.append("I found some similar past discussions:")
     for _, row in result["similar"].iterrows():
         lines.append(f"- *{row['title']}* (similarity: {row['similarity']:.2f})")
-
+ 
     lines.append(f"**Summary of the most relevant discussion** — *{result['top_match']['title']}*:")
     lines.append(result["summary"])
-
+ 
     if result["flagged"]:
         lines.append(f"⚠️ **Possible medical recommendation flagged for moderator review.** {result['reason']}")
     else:
         lines.append("✅ No risky medical language detected in this discussion's comments.")
-
+ 
     return "\n\n".join(lines)
-
-
+ 
+ 
 # --------------------------------------------------------------------------------------
 # Streamlit UI
 # --------------------------------------------------------------------------------------
@@ -201,7 +201,7 @@ def main():
         "Academic NLP prototype — topic classification & similarity search run locally; "
         "summarisation and risk-flagging are powered by the Gemini API (no model training)."
     )
-
+ 
     with st.sidebar:
         st.header("Setup")
         default_key = st.secrets["GEMINI_API_KEY"] if "GEMINI_API_KEY" in st.secrets else ""
@@ -221,21 +221,21 @@ def main():
             "4. Summarisation (Gemini API)\n"
             "5. Conversational output (this chat)"
         )
-
+ 
     if "history" not in st.session_state:
         st.session_state.history = []
-
+ 
     for role, content in st.session_state.history:
         with st.chat_message(role):
             st.markdown(content)
-
+ 
     query = st.chat_input("Ask a parenting question, e.g. 'my toddler won't eat vegetables'")
-
+ 
     if query:
         st.session_state.history.append(("user", query))
         with st.chat_message("user"):
             st.markdown(query)
-
+ 
         if not api_key:
             reply = "Please enter a Gemini API key in the sidebar to continue (it's free — see the link there)."
         else:
@@ -245,11 +245,12 @@ def main():
                     reply = format_bot_reply(result)
                 except Exception as e:
                     reply = f"Something went wrong calling the Gemini API: {e}"
-
+ 
         st.session_state.history.append(("assistant", reply))
         with st.chat_message("assistant"):
             st.markdown(reply)
-
-
+ 
+ 
 if __name__ == "__main__":
     main()
+ 
