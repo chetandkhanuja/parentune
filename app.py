@@ -90,7 +90,22 @@ def retrieve_similar_discussions(query, top_n=3):
 # --------------------------------------------------------------------------------------
 # Gemini API setup
 # --------------------------------------------------------------------------------------
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
+ 
+ 
+def get_gemini_model_name():
+    """Reads the model name from Streamlit secrets if set, so it can be changed
+    without editing code — Google has been renaming/retiring free-tier models
+    frequently. Falls back to DEFAULT_GEMINI_MODEL."""
+    try:
+        if "GEMINI_MODEL" in st.secrets:
+            return st.secrets["GEMINI_MODEL"]
+    except Exception:
+        pass
+    return DEFAULT_GEMINI_MODEL
+ 
+ 
+GEMINI_MODEL = get_gemini_model_name()
  
  
 def get_gemini_client(api_key):
@@ -241,6 +256,7 @@ def main():
                  "On Streamlit Cloud, set this as a secret instead (see README).",
         )
         st.markdown("---")
+        st.caption(f"Model: `{GEMINI_MODEL}`")
         st.markdown(
             "**Pipeline:**\n"
             "1. Topic classification (local ML)\n"
