@@ -245,26 +245,9 @@ def main():
         "summarisation and risk-flagging are powered by the Gemini API (no model training)."
     )
  
-    with st.sidebar:
-        st.header("Setup")
-        default_key = st.secrets["GEMINI_API_KEY"] if "GEMINI_API_KEY" in st.secrets else ""
-        api_key = st.text_input(
-            "Gemini API key",
-            value=default_key,
-            type="password",
-            help="Get a free key at https://aistudio.google.com/apikey. "
-                 "On Streamlit Cloud, set this as a secret instead (see README).",
-        )
-        st.markdown("---")
-        st.caption(f"Model: `{GEMINI_MODEL}`")
-        st.markdown(
-            "**Pipeline:**\n"
-            "1. Topic classification (local ML)\n"
-            "2. Similar discussion retrieval (local TF-IDF)\n"
-            "3. Risk flagging (Gemini API)\n"
-            "4. Summarisation (Gemini API)\n"
-            "5. Conversational output (this chat)"
-        )
+    # API key comes from Streamlit secrets (set in Streamlit Cloud's App settings -> Secrets).
+    # No sidebar/UI input for it, so nothing sensitive is shown or asked for at demo time.
+    api_key = st.secrets["GEMINI_API_KEY"] if "GEMINI_API_KEY" in st.secrets else ""
  
     if "history" not in st.session_state:
         st.session_state.history = []
@@ -281,7 +264,8 @@ def main():
             st.markdown(query)
  
         if not api_key:
-            reply = "Please enter a Gemini API key in the sidebar to continue (it's free — see the link there)."
+            reply = ("Gemini API key isn't configured. Add GEMINI_API_KEY under this app's "
+                      "Settings -> Secrets on Streamlit Cloud, then reboot the app.")
         else:
             with st.spinner("Classifying, retrieving similar discussions, and calling the API..."):
                 try:
