@@ -12,6 +12,7 @@ Pipeline:
  
 import os
 import re
+import time
 import pandas as pd
 import streamlit as st
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -95,6 +96,23 @@ def get_gemini_client(api_key):
     return genai.Client(api_key=api_key)
  
  
+def call_gemini_with_retry(client, prompt, max_attempts=4, base_delay=2):
+    """Calls the Gemini API, retrying with backoff if the model is temporarily
+    overloaded (503 UNAVAILABLE) or rate-limited (429). Other errors raise immediately."""
+    last_error = None
+    for attempt in range(max_attempts):
+        try:
+            return client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+        except Exception as e:
+            last_error = e
+            message = str(e)
+            is_retryable = "UNAVAILABLE" in message or "503" in message or "429" in message
+            if not is_retryable or attempt == max_attempts - 1:
+                raise
+            time.sleep(base_delay * (2 ** attempt))  # 2s, 4s, 8s...
+    raise last_error
+ 
+ 
 # --------------------------------------------------------------------------------------
 # Module 4 — summarisation via Gemini API
 # --------------------------------------------------------------------------------------
@@ -106,7 +124,7 @@ def summarise_discussion(comments_text, api_key):
         "Do not add any information that is not in the comments.\n\n"
         f"Comments:\n{comments_text}"
     )
-    response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+    response = call_gemini_with_retry(client, prompt)
     return response.text.strip()
  
  
@@ -127,7 +145,7 @@ def flag_risky_language(comments_text, api_key):
         "FLAG: YES or NO\n"
         "REASON: one short sentence"
     )
-    response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+    response = call_gemini_with_retry(client, prompt)
     text = response.text.strip()
  
     flag_match = re.search(r"FLAG:\s*(YES|NO)", text, re.IGNORECASE)
@@ -244,7 +262,13 @@ def main():
                     result = run_pipeline(query, api_key)
                     reply = format_bot_reply(result)
                 except Exception as e:
-                    reply = f"Something went wrong calling the Gemini API: {e}"
+                    message = str(e)
+                    if "UNAVAILABLE" in message or "503" in message:
+                        reply = ("Google's Gemini servers are overloaded right now, even after "
+                                 "retrying a few times. This is temporary on Google's side — please "
+                                 "try again in a minute.")
+                    else:
+                        reply = f"Something went wrong calling the Gemini API: {e}"
  
         st.session_state.history.append(("assistant", reply))
         with st.chat_message("assistant"):
