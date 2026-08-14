@@ -13,6 +13,7 @@ Pipeline:
 import os
 import re
 import time
+import concurrent.futures
 import pandas as pd
 import streamlit as st
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -169,8 +170,17 @@ def run_pipeline(query, api_key):
  
     summary, flagged, reason = None, False, None
     if is_similar_found:
-        summary = summarise_discussion(top_match["comments"], api_key)
-        flagged, reason = flag_risky_language(top_match["comments"], api_key)
+        comments_text = top_match["comments"]
+        # Fire both Gemini calls at once instead of waiting for one to finish before
+        # starting the other — this roughly halves the wait compared to sequential calls.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            summary_future = executor.submit(summarise_discussion, comments_text, api_key)
+            flag_future = executor.submit(flag_risky_language, comments_text, api_key)
+ 
+            # The summary is the primary output — if it fails, surface that error and
+            # don't bother using the flag result even if it happened to succeed.
+            summary = summary_future.result()
+            flagged, reason = flag_future.result()
  
     return {
         "category": category,
