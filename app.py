@@ -1,15 +1,18 @@
 """
 Parentune Conversational Intelligence — NLP Project Prototype
 IIM Amritsar — NLP Term IV
- 
+
 Pipeline:
-  Module 1 — Topic classification        : TF-IDF + Logistic Regression (local, trained on sample data)
-  Module 2 — Similar discussion retrieval: TF-IDF + cosine similarity (local)
-  Module 3 — Risk / warning flagging     : Gemini API (LLM call, no local training)
-  Module 4 — Discussion summarisation    : Gemini API (LLM call, no local training)
-  Module 5 — Conversational interface    : Streamlit chat UI, template-driven output
+  Module 1  — Topic classification         : TF-IDF + Logistic Regression (local, trained on sample data)
+  Module 2  — Similar discussion retrieval : TF-IDF + cosine similarity (local, unsupervised)
+  Module 3  — Risk / warning flagging      : Gemini API (LLM call, no local training)
+  Module 4a — Grounded answer generation   : Gemini API (LLM call, RAG-style — grounded in Module 2's
+                                              retrieved discussion when one is found, general knowledge
+                                              otherwise) — this is the actual response to the parent
+  Module 4b — Discussion summarisation     : Gemini API (LLM call, no local training)
+  Module 5  — Conversational interface     : Streamlit chat UI
 """
- 
+
 import os
 import re
 import time
@@ -19,32 +22,32 @@ import streamlit as st
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics.pairwise import cosine_similarity
- 
+
 from google import genai
- 
+
 # --------------------------------------------------------------------------------------
 # Page setup
 # --------------------------------------------------------------------------------------
 st.set_page_config(page_title="Parentune Conversational Intelligence", page_icon="👶", layout="centered")
- 
+
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-SIMILARITY_THRESHOLD = 0.15  # below this, we tell the user no strongly similar discussion was found
- 
+SIMILARITY_THRESHOLD = 0.15  # below this, we treat it as "no strongly similar discussion found"
+
 # --------------------------------------------------------------------------------------
 # Data loading
 # --------------------------------------------------------------------------------------
 @st.cache_data
 def load_training_data():
     return pd.read_csv(os.path.join(DATA_DIR, "training_queries.csv"))
- 
- 
+
+
 @st.cache_data
 def load_discussions():
     df = pd.read_csv(os.path.join(DATA_DIR, "discussions.csv"))
     df["full_text"] = df["title"] + ". " + df["comments"].str.replace("|||", " ", regex=False)
     return df
- 
- 
+
+
 # --------------------------------------------------------------------------------------
 # Module 1 — topic classifier (local, no external API)
 # --------------------------------------------------------------------------------------
@@ -56,15 +59,15 @@ def train_classifier():
     clf = LogisticRegression(max_iter=1000)
     clf.fit(X, train_df["category"])
     return vectorizer, clf
- 
- 
+
+
 def classify_query(query, vectorizer, clf):
     X = vectorizer.transform([query])
     pred = clf.predict(X)[0]
     proba = clf.predict_proba(X).max()
     return pred, proba
- 
- 
+
+
 # --------------------------------------------------------------------------------------
 # Module 2 — similarity / duplicate-discussion retrieval (local, no external API)
 # --------------------------------------------------------------------------------------
@@ -74,8 +77,8 @@ def build_similarity_index():
     vectorizer = TfidfVectorizer(stop_words="english")
     X = vectorizer.fit_transform(discussions_df["full_text"])
     return vectorizer, X
- 
- 
+
+
 def retrieve_similar_discussions(query, top_n=3):
     vectorizer, X = build_similarity_index()
     discussions_df = load_discussions()
@@ -85,14 +88,14 @@ def retrieve_similar_discussions(query, top_n=3):
     results = discussions_df.iloc[top_idx].copy()
     results["similarity"] = sims[top_idx]
     return results
- 
- 
+
+
 # --------------------------------------------------------------------------------------
 # Gemini API setup
 # --------------------------------------------------------------------------------------
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
- 
- 
+
+
 def get_gemini_model_name():
     """Reads the model name from Streamlit secrets if set, so it can be changed
     without editing code — Google has been renaming/retiring free-tier models
@@ -103,15 +106,15 @@ def get_gemini_model_name():
     except Exception:
         pass
     return DEFAULT_GEMINI_MODEL
- 
- 
+
+
 GEMINI_MODEL = get_gemini_model_name()
- 
- 
+
+
 def get_gemini_client(api_key):
     return genai.Client(api_key=api_key)
- 
- 
+
+
 def call_gemini_with_retry(client, prompt, max_attempts=4, base_delay=2):
     """Calls the Gemini API, retrying with backoff if the model is temporarily
     overloaded (503 UNAVAILABLE) or rate-limited (429). Other errors raise immediately."""
@@ -127,10 +130,49 @@ def call_gemini_with_retry(client, prompt, max_attempts=4, base_delay=2):
                 raise
             time.sleep(base_delay * (2 ** attempt))  # 2s, 4s, 8s...
     raise last_error
- 
- 
+
+
 # --------------------------------------------------------------------------------------
-# Module 4 — summarisation via Gemini API
+# Module 4a — grounded answer generation via Gemini API
+# --------------------------------------------------------------------------------------
+def generate_answer(query, category, context_text, api_key):
+    """Generates the actual reply to the parent's question.
+    If context_text is provided (a similar past discussion's comments, surfaced by
+    Module 2's TF-IDF retrieval), the answer is grounded in it — retrieval-augmented
+    generation rather than the model answering from general knowledge alone.
+    If context_text is None, no sufficiently similar discussion was found, so the
+    model answers from general knowledge instead."""
+    client = get_gemini_client(api_key)
+
+    safety_rule = (
+        "Never suggest a specific medicine, syrup, tablet, or dosage for a child. "
+        "For anything that sounds medical, tell the parent to consult a pediatrician instead."
+    )
+
+    if context_text:
+        prompt = (
+            "You are a warm, practical parenting assistant answering a parent directly. "
+            "Below is an excerpt from a community discussion related to their question — use it as "
+            "supporting context where it's genuinely relevant, but you may also draw on your own "
+            "knowledge. Answer in 4-6 sentences, direct and specific. Do not mention that you were "
+            "given context or reference 'the discussion' explicitly — just answer naturally, as if "
+            f"this is your own advice. {safety_rule}\n\n"
+            f"Parent's question (topic: {category}): {query}\n\n"
+            f"Related community discussion excerpt:\n{context_text}"
+        )
+    else:
+        prompt = (
+            "You are a warm, practical parenting assistant answering a parent directly. "
+            f"Answer in 4-6 sentences, direct and specific. {safety_rule}\n\n"
+            f"Parent's question (topic: {category}): {query}"
+        )
+
+    response = call_gemini_with_retry(client, prompt)
+    return response.text.strip()
+
+
+# --------------------------------------------------------------------------------------
+# Module 4b — summarisation via Gemini API
 # --------------------------------------------------------------------------------------
 def summarise_discussion(comments_text, api_key):
     client = get_gemini_client(api_key)
@@ -142,8 +184,8 @@ def summarise_discussion(comments_text, api_key):
     )
     response = call_gemini_with_retry(client, prompt)
     return response.text.strip()
- 
- 
+
+
 # --------------------------------------------------------------------------------------
 # Module 3 — risk / warning flagging via Gemini API
 # --------------------------------------------------------------------------------------
@@ -163,41 +205,48 @@ def flag_risky_language(comments_text, api_key):
     )
     response = call_gemini_with_retry(client, prompt)
     text = response.text.strip()
- 
+
     flag_match = re.search(r"FLAG:\s*(YES|NO)", text, re.IGNORECASE)
     reason_match = re.search(r"REASON:\s*(.+)", text, re.IGNORECASE)
- 
+
     flagged = bool(flag_match and flag_match.group(1).upper() == "YES")
     reason = reason_match.group(1).strip() if reason_match else text
     return flagged, reason
- 
- 
+
+
 # --------------------------------------------------------------------------------------
 # Module 5 — conversational interface
 # --------------------------------------------------------------------------------------
 def run_pipeline(query, api_key):
     vectorizer, clf = train_classifier()
     category, confidence = classify_query(query, vectorizer, clf)
- 
+
     similar = retrieve_similar_discussions(query, top_n=3)
     top_match = similar.iloc[0]
     is_similar_found = top_match["similarity"] >= SIMILARITY_THRESHOLD
- 
+
     summary, flagged, reason = None, False, None
+
     if is_similar_found:
         comments_text = top_match["comments"]
-        # Fire both Gemini calls at once instead of waiting for one to finish before
-        # starting the other — this roughly halves the wait compared to sequential calls.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        # Fire all three Gemini calls at once instead of sequentially — this roughly
+        # a third of the wait compared to running them one after another.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            answer_future = executor.submit(generate_answer, query, category, comments_text, api_key)
             summary_future = executor.submit(summarise_discussion, comments_text, api_key)
             flag_future = executor.submit(flag_risky_language, comments_text, api_key)
- 
-            # The summary is the primary output — if it fails, surface that error and
-            # don't bother using the flag result even if it happened to succeed.
+
+            # The direct answer is the primary output — if it fails, that's the error
+            # that surfaces, even if summary/flag happened to succeed.
+            answer = answer_future.result()
             summary = summary_future.result()
             flagged, reason = flag_future.result()
- 
+    else:
+        # No grounding discussion available — answer from general knowledge alone.
+        answer = generate_answer(query, category, None, api_key)
+
     return {
+        "answer": answer,
         "category": category,
         "confidence": confidence,
         "similar": similar,
@@ -207,67 +256,68 @@ def run_pipeline(query, api_key):
         "flagged": flagged,
         "reason": reason,
     }
- 
- 
+
+
 def format_bot_reply(result):
     lines = []
+
+    # The direct answer leads — it's the actual response to what the parent asked.
+    lines.append(result["answer"])
+
     lines.append(
-        f"**I categorised this as: {result['category']}** "
-        f"(confidence: {result['confidence']*100:.0f}%)"
+        f"*(Classified as: {result['category']}, confidence: {result['confidence']*100:.0f}%)*"
     )
- 
+
     if not result["is_similar_found"]:
-        lines.append("I couldn't find a closely related past discussion for this query yet.")
+        lines.append("I couldn't find a closely related past discussion for this query yet, "
+                      "so the answer above is based on general knowledge rather than community threads.")
         return "\n\n".join(lines)
- 
-    lines.append("I found some similar past discussions:")
+
+    lines.append("This is grounded in similar past discussions I found:")
     for _, row in result["similar"].iterrows():
         lines.append(f"- *{row['title']}* (similarity: {row['similarity']:.2f})")
- 
+
     lines.append(f"**Summary of the most relevant discussion** — *{result['top_match']['title']}*:")
     lines.append(result["summary"])
- 
+
     if result["flagged"]:
         lines.append(f"⚠️ **Possible medical recommendation flagged for moderator review.** {result['reason']}")
     else:
         lines.append("✅ No risky medical language detected in this discussion's comments.")
- 
+
     return "\n\n".join(lines)
- 
- 
-# --------------------------------------------------------------------------------------
-# Streamlit UI
-# --------------------------------------------------------------------------------------
+
+
 def main():
     st.title("👶 Parentune Conversational Intelligence")
     st.caption(
         "Academic NLP prototype — topic classification & similarity search run locally; "
-        "summarisation and risk-flagging are powered by the Gemini API (no model training)."
+        "answer generation, summarisation, and risk-flagging are powered by the Gemini API."
     )
- 
+
     # API key comes from Streamlit secrets (set in Streamlit Cloud's App settings -> Secrets).
     # No sidebar/UI input for it, so nothing sensitive is shown or asked for at demo time.
     api_key = st.secrets["GEMINI_API_KEY"] if "GEMINI_API_KEY" in st.secrets else ""
- 
+
     if "history" not in st.session_state:
         st.session_state.history = []
- 
+
     for role, content in st.session_state.history:
         with st.chat_message(role):
             st.markdown(content)
- 
+
     query = st.chat_input("Ask a parenting question, e.g. 'my toddler won't eat vegetables'")
- 
+
     if query:
         st.session_state.history.append(("user", query))
         with st.chat_message("user"):
             st.markdown(query)
- 
+
         if not api_key:
             reply = ("Gemini API key isn't configured. Add GEMINI_API_KEY under this app's "
                       "Settings -> Secrets on Streamlit Cloud, then reboot the app.")
         else:
-            with st.spinner("Classifying, retrieving similar discussions, and calling the API..."):
+            with st.spinner("Classifying, retrieving similar discussions, and generating an answer..."):
                 try:
                     result = run_pipeline(query, api_key)
                     reply = format_bot_reply(result)
@@ -279,12 +329,11 @@ def main():
                                  "try again in a minute.")
                     else:
                         reply = f"Something went wrong calling the Gemini API: {e}"
- 
+
         st.session_state.history.append(("assistant", reply))
         with st.chat_message("assistant"):
             st.markdown(reply)
- 
- 
+
+
 if __name__ == "__main__":
     main()
- 
