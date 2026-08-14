@@ -90,7 +90,7 @@ def retrieve_similar_discussions(query, top_n=3):
 # --------------------------------------------------------------------------------------
 # Gemini API setup
 # --------------------------------------------------------------------------------------
-GEMINI_MODEL = "gemini-flash-latest"
+GEMINI_MODEL = "gemini-2.5-flash-lite"
  
  
 def get_gemini_client(api_key):
